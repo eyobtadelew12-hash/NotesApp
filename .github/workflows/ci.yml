@@ -1,0 +1,127 @@
+name: CI
+
+# Checks on every push to a feature branch and on every pull request into main.
+# Nothing is deployed and nothing is published from here.
+#   build -> unit tests (Moq, coverlet) -> shim tests (Fakes) -> SonarCloud quality gate -> Snyk
+# Mark "all-green" as the required check on main.
+on:
+  push:
+    branches-ignore: [main]
+    tags-ignore: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SONAR_SCANNER_VERSION: 12.0.0.12728
+  SNYK_VERSION: 1.1308.3
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # SonarCloud runs when these are set (see docs/PRACTICE.md, setup step 4).
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+      SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0          # SonarCloud needs history for "new code"
+          persist-credentials: false
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: SonarCloud begin
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_PROJECT_KEY != '' }}
+        run: |
+          $zip = "$env:RUNNER_TEMP\sonar.zip"
+          Invoke-WebRequest "https://github.com/SonarSource/sonar-scanner-msbuild/releases/download/$env:SONAR_SCANNER_VERSION/sonar-scanner-$env:SONAR_SCANNER_VERSION-net-framework.zip" -OutFile $zip
+          Expand-Archive $zip "$env:RUNNER_TEMP\sonar" -Force
+          & "$env:RUNNER_TEMP\sonar\SonarScanner.MSBuild.exe" begin `
+            /k:"$env:SONAR_PROJECT_KEY" /o:"$env:SONAR_ORGANIZATION" `
+            /d:sonar.host.url="https://sonarcloud.io" /d:sonar.token="$env:SONAR_TOKEN" `
+            /d:sonar.cs.opencover.reportsPaths="TestResults/unit/**/coverage.opencover.xml" `
+            /d:sonar.cs.vscoveragexml.reportsPaths="TestResults/shims/**/*.xml" `
+            /d:sonar.qualitygate.wait=true
+          if ($LASTEXITCODE -ne 0) { throw 'SonarScanner begin failed.' }
+
+      - name: Build solution
+        run: msbuild NotesApp.sln /restore /t:Build /p:Configuration=Release /p:TreatWarningsAsErrors=true /warnaserror /m /v:minimal
+
+      - name: Unit tests (Moq) with coverage
+        run: >
+          dotnet test tests/NotesApp.Tests/NotesApp.Tests.csproj --configuration Release --no-build
+          --logger trx --results-directory TestResults/unit
+          --collect:"XPlat Code Coverage;Format=opencover"
+
+      # Fakes needs Visual Studio Enterprise: GitHub's Windows runners have it.
+      - name: Shim tests (Microsoft Fakes) with coverage
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $fakes = & $vswhere -latest -products * -find '**\PublicAssemblies\Microsoft.QualityTools.Testing.Fakes.dll' | Select-Object -First 1
+          if (-not $fakes) { throw 'Microsoft Fakes not found on this runner (needs Visual Studio Enterprise).' }
+          msbuild tests/NotesApp.ShimTests/NotesApp.ShimTests.csproj /restore /p:Configuration=Release "/p:FakesAssemblyPath=$fakes" /m /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Shim test build failed.' }
+          $vstest = & $vswhere -latest -products * -find '**\vstest.console.exe' | Select-Object -First 1
+          & $vstest tests/NotesApp.ShimTests/bin/Release/net48/NotesApp.ShimTests.dll /logger:trx /ResultsDirectory:TestResults/shims /Collect:"Code Coverage;Format=Xml"
+          if ($LASTEXITCODE -ne 0) { throw 'Shim tests failed.' }
+
+      - name: SonarCloud end (waits for the quality gate)
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_PROJECT_KEY != '' }}
+        run: |
+          & "$env:RUNNER_TEMP\sonar\SonarScanner.MSBuild.exe" end /d:sonar.token="$env:SONAR_TOKEN"
+          if ($LASTEXITCODE -ne 0) { throw 'SonarCloud analysis or quality gate failed.' }
+
+      - name: SonarCloud skipped
+        if: ${{ env.SONAR_TOKEN == '' || env.SONAR_PROJECT_KEY == '' }}
+        run: |
+          Write-Host '::notice::SonarCloud skipped - set secret SONAR_TOKEN and variables SONAR_ORGANIZATION / SONAR_PROJECT_KEY (docs/PRACTICE.md).'
+
+      - name: Snyk dependency scan
+        if: ${{ env.SNYK_TOKEN != '' }}
+        run: |
+          npm install --global "snyk@$env:SNYK_VERSION" --no-fund --no-audit
+          snyk test --all-projects --severity-threshold=high --exclude=out
+          if ($LASTEXITCODE -ne 0) { throw 'Snyk found high or critical vulnerabilities.' }
+
+      - name: Snyk skipped
+        if: ${{ env.SNYK_TOKEN == '' }}
+        run: |
+          Write-Host '::notice::Snyk skipped - add a SNYK_TOKEN repository secret (docs/PRACTICE.md).'
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: TestResults/**/*.trx
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The single required check for main (branch ruleset).
+  all-green:
+    name: all-green
+    if: ${{ always() }}
+    needs: [build-and-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if a required job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1

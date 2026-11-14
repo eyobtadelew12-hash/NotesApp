@@ -1,0 +1,32 @@
+name: Promote
+
+# Deploys a RELEASED version (from GitHub Packages, our "Nexus") to PAT or PROD.
+# Nothing is rebuilt: PROD runs the exact bytes that passed SIT.
+# Add "Required reviewers" to the PAT and PROD environments.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released version, e.g. 1.0.0
+        required: true
+        type: string
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [PAT, PROD]
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  promote:
+    name: ${{ inputs.environment }}
+    uses: ./.github/workflows/deploy-web.yml
+    with:
+      environment: ${{ inputs.environment }}
+      source: release
+      version: ${{ inputs.version }}
+    secrets: inherit

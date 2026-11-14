@@ -1,0 +1,19 @@
+:root { --ink: #13283d; --soft: #5a6a7a; --bg: #f5f7f6; --card: #fdfefd; --teal: #0e7c7b; --amber: #a9520a; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: var(--bg); color: var(--ink); }
+.top { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: var(--ink); color: #eef3f2; }
+.top h1 { margin: 0; font-size: 24px; }
+.env { font-size: 14px; background: #1c3a52; padding: 4px 12px; border-radius: 20px; }
+.page { max-width: 720px; margin: 24px auto; padding: 0 16px; display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border-radius: 12px; padding: 20px; box-shadow: 0 4px 14px rgba(19, 40, 61, .07); display: flex; flex-direction: column; gap: 8px; }
+.card h2 { margin: 0 0 4px; font-size: 18px; }
+label { font-size: 14px; color: var(--soft); }
+input[type=text], textarea { font: inherit; padding: 8px 10px; border: 1px solid #c9d5d4; border-radius: 8px; }
+.primary { align-self: flex-start; margin-top: 4px; background: var(--teal); color: #fff; border: 0; border-radius: 8px; padding: 8px 18px; font: inherit; cursor: pointer; }
+.error { color: var(--amber); font-size: 14px; }
+.note-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.note h3 { margin: 0; font-size: 17px; }
+.note p { margin: 0; white-space: pre-wrap; color: var(--soft); }
+.age { font-size: 13px; color: var(--soft); white-space: nowrap; }
+.delete { align-self: flex-end; font-size: 13px; color: var(--amber); }
+.empty { text-align: center; color: var(--soft); padding: 24px; }

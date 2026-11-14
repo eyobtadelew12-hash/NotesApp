@@ -1,0 +1,44 @@
+name: Deploy to SIT
+
+# Deploys an existing TEST build (from the Build workflow) to SIT. Nothing is rebuilt.
+# Add "Required reviewers" to the SIT environment to make this wait for an approval.
+on:
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Run id of the Build run to deploy (shown in its summary)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  check:
+    name: check-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The run must be a successful Build run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run-id }}
+        run: |
+          set -euo pipefail
+          info=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')
+          IFS=$'\t' read -r path conclusion branch sha <<< "$info"
+          echo "Run $RUN_ID: $path, $conclusion, branch $branch, commit $sha"
+          [[ "$path" == ".github/workflows/build.yml" ]] || { echo "::error::Run $RUN_ID is not a Build run."; exit 1; }
+          [[ "$conclusion" == "success" ]] || { echo "::error::Build run $RUN_ID did not succeed."; exit 1; }
+
+  deploy:
+    name: SIT
+    needs: check
+    uses: ./.github/workflows/deploy-web.yml
+    with:
+      environment: SIT
+      source: build
+      run-id: ${{ inputs.run-id }}
+    secrets: inherit

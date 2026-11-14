@@ -1,0 +1,11 @@
+<Fakes xmlns="http://schemas.microsoft.com/fakes/2011/" Diagnostic="true">
+  <Assembly Name="mscorlib" Version="4.0.0.0" />
+  <!-- Only generate what the tests use: faking all of mscorlib is slow. -->
+  <StubGeneration>
+    <Clear />
+  </StubGeneration>
+  <ShimGeneration>
+    <Clear />
+    <Add FullName="System.DateTime!" />
+  </ShimGeneration>
+</Fakes>

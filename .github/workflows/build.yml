@@ -1,0 +1,84 @@
+name: Build
+
+# A TEST build for every merge into main and every push to a hotfix branch.
+#   main          -> 1.(next).0-ci.<run>  -> deployed to DEV automatically
+#   hotfix/x.y.z  -> x.y.z-ci.<run>       -> deploy to SIT with the "Deploy to SIT" workflow
+# Test builds stay in this run for 30 days. They are NOT published: only release.yml does that.
+on:
+  push:
+    branches: [main, 'hotfix/**']
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+# deploy-web.yml needs these; a called workflow can't have more than its caller.
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  build:
+    name: test-build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0          # tags are needed to work out the version
+          persist-credentials: false
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: Work out the build version
+        id: version
+        run: ./scripts/Get-BuildVersion.ps1 -RunNumber '${{ github.run_number }}'
+
+      - name: Unit tests
+        run: |
+          msbuild NotesApp.sln /restore /p:Configuration=Release /m /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+          dotnet test tests/NotesApp.Tests/NotesApp.Tests.csproj --configuration Release --no-build
+
+      - name: Build package
+        run: ./scripts/New-ReleasePackage.ps1 -Version '${{ steps.version.outputs.version }}' -OutputDir out
+
+      - name: Keep the package in this run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-build
+          path: |
+            out/*.zip
+            out/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          @("## Test build ${{ steps.version.outputs.version }}", "",
+            "| | |", "|---|---|",
+            "| Branch | ``${{ github.ref_name }}`` |",
+            "| Commit | ``${{ github.sha }}`` |",
+            "| Run id | **``${{ github.run_id }}``** |", "",
+            "Next: **Deploy to SIT** with run id ``${{ github.run_id }}``. After SIT sign-off: **Release** with the same run id.") |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+  deploy-dev:
+    name: DEV
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: build
+    uses: ./.github/workflows/deploy-web.yml
+    with:
+      environment: DEV
+      source: build
+      run-id: ${{ github.run_id }}
+    secrets: inherit

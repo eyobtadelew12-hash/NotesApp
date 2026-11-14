@@ -1,0 +1,160 @@
+name: Release
+
+# Turns a SIT-tested TEST build into a release. Nothing is rebuilt:
+#   1. the run must be a successful Build run from main or hotfix/x.y.z
+#   2. that exact commit must have a successful SIT deployment
+#   3. the SAME zip is published to GitHub Packages (our "Nexus") as NotesApp.Web <version>;
+#      a version can be published only once
+#   4. the commit is tagged v<version> and a GitHub Release is created
+# Then PAT and PROD get it through the Promote workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Run id of the SIT-tested Build run
+        required: true
+        type: string
+      version:
+        description: Release version (leave empty to use the build's version without -ci.N)
+        required: false
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write     # push the tag, create the GitHub Release
+  packages: write     # publish to GitHub Packages
+  actions: read       # download the build artifact
+  deployments: read   # check the SIT deployment
+
+jobs:
+  release:
+    name: release
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.run-id }}
+    steps:
+      - name: Checkout (full history and tags)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the build run
+        id: run
+        run: |
+          $run = gh api "repos/${{ github.repository }}/actions/runs/$env:RUN_ID" | ConvertFrom-Json
+          if ($run.path -ne '.github/workflows/build.yml') { throw "Run $env:RUN_ID is not a Build run." }
+          if ($run.conclusion -ne 'success') { throw "Build run $env:RUN_ID did not succeed." }
+          if ($run.head_branch -ne 'main' -and $run.head_branch -notmatch '^hotfix/\d+\.\d+\.\d+$') {
+            throw "Releases come from main or hotfix/x.y.z, not '$($run.head_branch)'."
+          }
+          "sha=$($run.head_sha)"      >> $env:GITHUB_OUTPUT
+          "branch=$($run.head_branch)" >> $env:GITHUB_OUTPUT
+          Write-Host "Build run $env:RUN_ID: $($run.head_branch) at $($run.head_sha)"
+
+      - name: Check it passed SIT
+        run: |
+          $sha = '${{ steps.run.outputs.sha }}'
+          $deployments = gh api "repos/${{ github.repository }}/deployments?environment=SIT&sha=$sha" | ConvertFrom-Json
+          $ok = $false
+          foreach ($d in $deployments) {
+            $states = gh api "repos/${{ github.repository }}/deployments/$($d.id)/statuses" | ConvertFrom-Json
+            if ($states | Where-Object state -eq 'success') { $ok = $true; break }
+          }
+          if (-not $ok) { throw "Commit $sha has no successful SIT deployment. Run 'Deploy to SIT' with run id $env:RUN_ID first." }
+          Write-Host "Commit $sha was deployed to SIT successfully."
+
+      - name: Get the tested package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-build
+          path: build
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Work out and check the release version
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          $zip = Get-ChildItem build -Filter 'NotesApp.Web.*.zip' | Select-Object -First 1
+          $buildVersion = $zip.BaseName -replace '^NotesApp\.Web\.', ''
+          $version = if ($env:REQUESTED) { $env:REQUESTED.TrimStart('v') } else { $buildVersion -replace '-ci\.\d+$', '' }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Release version must be MAJOR.MINOR.PATCH, got '$version'." }
+          $branch = '${{ steps.run.outputs.branch }}'
+          if ($branch -match '^hotfix/(.+)$' -and $Matches[1] -ne $version) { throw "Branch $branch can only release $($Matches[1])." }
+          if (git tag --list "v$version") { throw "v$version already exists. Versions are released only once." }
+          "version=$version"            >> $env:GITHUB_OUTPUT
+          "build-version=$buildVersion" >> $env:GITHUB_OUTPUT
+          "zip=$($zip.FullName)"        >> $env:GITHUB_OUTPUT
+          Write-Host "Releasing build $buildVersion as $version"
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@fd55a6f3b34392fa83fde1454582407d8c714123 # v4.0
+
+      - name: Publish to GitHub Packages (same files, new name)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_VERSION: ${{ steps.version.outputs.build-version }}
+          ZIP: ${{ steps.version.outputs.zip }}
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          $name = "NotesApp.Web.$env:VERSION.zip"
+          Copy-Item $env:ZIP "release\$name"                      # byte-for-byte the SIT-tested zip
+          $hash = (Get-FileHash "release\$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne (Get-Content "$env:ZIP.sha256").Split(' ')[0]) { throw 'Package changed since the build.' }
+          Set-Content "release\$name.sha256" "$hash  $name" -Encoding ASCII
+          @"
+          <?xml version="1.0"?>
+          <package>
+            <metadata>
+              <id>NotesApp.Web</id>
+              <version>$env:VERSION</version>
+              <authors>NotesApp team</authors>
+              <description>NotesApp.Web release $env:VERSION (build $env:BUILD_VERSION, commit $env:SHA). Deploy with the Promote workflow.</description>
+              <repository type="git" url="https://github.com/${{ github.repository }}" commit="$env:SHA" />
+            </metadata>
+            <files>
+              <file src="$name" target="package" />
+              <file src="$name.sha256" target="package" />
+            </files>
+          </package>
+          "@ | Set-Content release\NotesApp.Web.nuspec -Encoding UTF8
+          nuget pack release\NotesApp.Web.nuspec -OutputDirectory release -NoPackageAnalysis -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw 'nuget pack failed.' }
+          dotnet nuget push "release\NotesApp.Web.$env:VERSION.nupkg" --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --api-key "${{ github.token }}"
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed (a version can only be published once).' }
+
+      - name: Tag the commit and create the GitHub Release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_VERSION: ${{ steps.version.outputs.build-version }}
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "v$env:VERSION" $env:SHA -m "Release $env:VERSION (build $env:BUILD_VERSION)"
+          git push origin "v$env:VERSION"
+          $previous = git describe --tags --abbrev=0 --match 'v[0-9]*' "$env:SHA^" 2>$null
+          $changes = if ($previous) { git log --oneline "$previous..$env:SHA" } else { git log --oneline $env:SHA }
+          $notes = @("Build ``$env:BUILD_VERSION`` from commit ``$env:SHA``, tested in SIT.", "",
+                     "Deploy with **Promote**: version ``$env:VERSION``.", "", "### Changes") + ($changes | ForEach-Object { "- $_" })
+          $notes -join "`n" | Set-Content release\notes.md -Encoding UTF8
+          gh release create "v$env:VERSION" "release\NotesApp.Web.$env:VERSION.zip" "release\NotesApp.Web.$env:VERSION.zip.sha256" --title "NotesApp $env:VERSION" --notes-file release\notes.md --verify-tag
+
+      - name: Summary
+        run: |
+          @("## Released NotesApp ${{ steps.version.outputs.version }}", "",
+            "- Build ``${{ steps.version.outputs.build-version }}`` (run ${{ inputs.run-id }}), commit ``${{ steps.run.outputs.sha }}``",
+            "- Published to GitHub Packages: **NotesApp.Web ${{ steps.version.outputs.version }}**",
+            "- Tagged **v${{ steps.version.outputs.version }}**", "",
+            "Next: **Promote** version ``${{ steps.version.outputs.version }}`` to PAT, then PROD.") |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

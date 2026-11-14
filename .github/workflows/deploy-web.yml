@@ -1,0 +1,118 @@
+name: Deploy (reusable)
+
+# Installs one package on one environment. Used by build.yml (DEV), deploy-sit.yml (SIT)
+# and promote.yml (PAT, PROD).
+#   source: build    -> the test build artifact of Build run <run-id>
+#   source: release  -> released <version> from GitHub Packages (our "Nexus")
+#
+# Runs on: repository variable DEPLOY_RUNNER ("self-hosted" = your PC with IIS),
+#          else GitHub's windows-latest (dry run).
+# Per GitHub environment, variables:
+#   SqlServer, SqlDatabase                fill the #{tokens}# in Web.config
+#   IIS_SITE_NAME, SITE_ROOT, HEALTH_URL  real IIS deploy; not set = dry run
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      source:
+        type: string
+        required: true
+      run-id:
+        type: string
+        default: ''
+      version:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'windows-latest' }}
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: powershell     # Windows PowerShell 5.1: present on every Windows machine
+    steps:
+      - name: Clean work folder
+        run: if (Test-Path pkg) { Remove-Item pkg -Recurse -Force }
+
+      - name: Get the test build
+        if: ${{ inputs.source == 'build' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-build
+          path: pkg
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Setup NuGet
+        if: ${{ inputs.source == 'release' }}
+        uses: NuGet/setup-nuget@fd55a6f3b34392fa83fde1454582407d8c714123 # v4.0
+
+      - name: Get the release from GitHub Packages
+        if: ${{ inputs.source == 'release' }}
+        env:
+          VERSION: ${{ inputs.version }}
+          TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          $feed = "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          nuget sources add -Name releases -Source $feed -Username actions -Password $env:TOKEN -StorePasswordInClearText -ConfigFile pkg\nuget.config
+          nuget install NotesApp.Web -Version $env:VERSION -Source releases -ConfigFile pkg\nuget.config -OutputDirectory pkg\nuget -NonInteractive -DirectDownload
+          if ($LASTEXITCODE -ne 0) { throw "Release $env:VERSION not found in GitHub Packages." }
+          Get-ChildItem pkg\nuget -Recurse -Include *.zip, *.sha256 | Move-Item -Destination pkg
+          Remove-Item pkg\nuget.config
+
+      - name: Verify checksum and extract
+        run: |
+          $zip = Get-ChildItem pkg -Filter 'NotesApp.Web.*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'No package found.' }
+          $expected = (Get-Content "$($zip.FullName).sha256").Split(' ')[0]
+          $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "Checksum mismatch: expected $expected, got $actual" }
+          Expand-Archive $zip.FullName -DestinationPath pkg\extracted -Force
+          Write-Host "Package $($zip.Name) verified."
+
+      - name: Install on ${{ inputs.environment }}
+        env:
+          CONFIG_VALUES: ${{ toJSON(vars) }}
+          IIS_SITE_NAME: ${{ vars.IIS_SITE_NAME }}
+          SITE_ROOT: ${{ vars.SITE_ROOT }}
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          $install = '.\pkg\extracted\deploy\Install-Release.ps1'
+          $common = @{ Environment = '${{ inputs.environment }}' }
+          if ($env:RELEASE_VERSION) { $common.ReleaseVersion = $env:RELEASE_VERSION }
+          if ($env:IIS_SITE_NAME) {
+            & $install @common -SiteRoot $env:SITE_ROOT -IisSiteName $env:IIS_SITE_NAME -HealthUrl $env:HEALTH_URL
+          } else {
+            Write-Host '::notice::IIS_SITE_NAME is not set for this environment: dry run (Web.config generated, database and IIS untouched).'
+            & $install @common -SiteRoot "$env:RUNNER_TEMP\sites\NotesApp\${{ inputs.environment }}" -DryRun
+          }
+
+      - name: Summary
+        env:
+          IIS_SITE_NAME: ${{ vars.IIS_SITE_NAME }}
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: |
+          $manifest = Get-Content pkg\extracted\manifest.json -Raw | ConvertFrom-Json
+          $shown = if ('${{ inputs.version }}') { '${{ inputs.version }}' } else { $manifest.version }
+          $result = if ($env:IIS_SITE_NAME) { "live on IIS site ``$env:IIS_SITE_NAME`` ($env:HEALTH_URL passed)" } else { 'dry run (IIS_SITE_NAME not set)' }
+          @("## ${{ inputs.environment }}: $shown", "", "Build ``$($manifest.version)`` from ``$($manifest.branch)`` at ``$($manifest.commit)``: $result") |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Remove work folder
+        if: ${{ always() }}
+        run: if (Test-Path pkg) { Remove-Item pkg -Recurse -Force -ErrorAction SilentlyContinue }
