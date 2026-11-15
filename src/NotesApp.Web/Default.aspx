@@ -27,7 +27,7 @@
                 <asp:Label ID="lblError" runat="server" CssClass="error" Visible="false" />
                 <asp:Button ID="btnAdd" runat="server" Text="Add note" OnClick="btnAdd_Click" CssClass="primary" />
             </section>
-
+            <asp:Literal ID="litCount" runat="server" />
             <asp:Repeater ID="rptNotes" runat="server" OnItemCommand="rptNotes_ItemCommand">
                 <ItemTemplate>
                     <article class="card note">
