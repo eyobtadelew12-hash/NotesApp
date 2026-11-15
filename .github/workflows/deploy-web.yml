@@ -40,6 +40,11 @@ jobs:
     concurrency:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false
+    env:
+      # Deploy agents keep Windows' default execution policy (Restricted), which blocks the .ps1 file
+      # the runner writes for every step. This allows scripts for this job's PowerShell processes only;
+      # the machine's own policy is not changed.
+      PSExecutionPolicyPreference: Bypass
     defaults:
       run:
         shell: powershell     # Windows PowerShell 5.1: present on every Windows machine
