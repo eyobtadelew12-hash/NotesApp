@@ -73,7 +73,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force pkg | Out-Null
           $feed = "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          # nuget.exe only edits an existing config file, so start one that knows no other feeds (<clear />).
+          '<?xml version="1.0" encoding="utf-8"?><configuration><packageSources><clear /></packageSources></configuration>' |
+            Set-Content pkg\nuget.config -Encoding UTF8
           nuget sources add -Name releases -Source $feed -Username actions -Password $env:TOKEN -StorePasswordInClearText -ConfigFile pkg\nuget.config
+          if ($LASTEXITCODE -ne 0) { throw 'Could not configure the GitHub Packages feed.' }
           nuget install NotesApp.Web -Version $env:VERSION -Source releases -ConfigFile pkg\nuget.config -OutputDirectory pkg\nuget -NonInteractive -DirectDownload
           if ($LASTEXITCODE -ne 0) { throw "Release $env:VERSION not found in GitHub Packages." }
           Get-ChildItem pkg\nuget -Recurse -Include *.zip, *.sha256 | Move-Item -Destination pkg
