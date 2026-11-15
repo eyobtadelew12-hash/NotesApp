@@ -41,7 +41,9 @@ jobs:
 
       - name: Work out the build version
         id: version
-        run: ./scripts/Get-BuildVersion.ps1 -RunNumber '${{ github.run_number }}'
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          ./scripts/Get-BuildVersion.ps1 -RunNumber '${{ github.run_number }}'
 
       - name: Unit tests
         run: |
@@ -50,7 +52,9 @@ jobs:
           dotnet test tests/NotesApp.Tests/NotesApp.Tests.csproj --configuration Release --no-build
 
       - name: Build package
-        run: ./scripts/New-ReleasePackage.ps1 -Version '${{ steps.version.outputs.version }}' -OutputDir out
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          ./scripts/New-ReleasePackage.ps1 -Version '${{ steps.version.outputs.version }}' -OutputDir out
 
       - name: Keep the package in this run
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
