@@ -58,6 +58,7 @@ namespace NotesApp.Web
         private void BindNotes()
         {
             var notes = _notes.GetNotes();
+            litCount.Text = notes.Count + " notes";
             rptNotes.DataSource = notes;
             rptNotes.DataBind();
             pnlEmpty.Visible = notes.Count == 0;

@@ -51,5 +51,10 @@ namespace NotesApp.Core
 
             _repository.Delete(id);
         }
+
+        public int CountNotes()
+        {
+            return _repository.GetAll().Count();
+        }
     }
 }

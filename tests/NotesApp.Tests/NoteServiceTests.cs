@@ -88,5 +88,17 @@ namespace NotesApp.Tests
         {
             Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => _service.DeleteNote(0));
         }
+        [TestMethod]
+        public void CountNotes_returns_the_count_from_the_repository()
+        {
+            _repository.Setup(r => r.GetAll()).Returns(new List<Note>
+            {
+                new Note { Id = 1, Title = "note1", CreatedAt = Now },
+                new Note { Id = 2, Title = "note2", CreatedAt = Now },
+                new Note { Id = 3, Title = "note3", CreatedAt = Now }
+            });
+            var count = _service.CountNotes();
+            Assert.AreEqual(3, count);
+        }
     }
 }
