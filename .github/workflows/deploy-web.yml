@@ -80,7 +80,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not configure the GitHub Packages feed.' }
           nuget install NotesApp.Web -Version $env:VERSION -Source releases -ConfigFile pkg\nuget.config -OutputDirectory pkg\nuget -NonInteractive -DirectDownload
           if ($LASTEXITCODE -ne 0) { throw "Release $env:VERSION not found in GitHub Packages." }
-          Get-ChildItem pkg\nuget -Recurse -Include *.zip, *.sha256 | Move-Item -Destination pkg
+          # NuGet never unpacks a package's package/ folder (it keeps that name for its own metadata),
+          # so take the zip and its checksum straight out of the .nupkg, which is itself a zip file.
+          $nupkg = Get-ChildItem pkg\nuget -Recurse -Filter *.nupkg | Select-Object -First 1
+          if (-not $nupkg) { throw "Release $env:VERSION was not downloaded." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($nupkg.FullName)
+          try {
+            $archive.Entries | Where-Object { $_.FullName -match '^package/NotesApp\.Web\.[^/]+\.zip(\.sha256)?$' } |
+              ForEach-Object { [IO.Compression.ZipFileExtensions]::ExtractToFile($_, (Join-Path (Resolve-Path pkg) $_.Name), $true) }
+          } finally { $archive.Dispose() }
           Remove-Item pkg\nuget.config
 
       - name: Verify checksum and extract
