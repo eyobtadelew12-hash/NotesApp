@@ -39,7 +39,7 @@ namespace NotesApp.Tests
         {
             var error = _service.AddNote(title, "body");
 
-            Assert.AreEqual("A title is required.", error);
+            Assert.AreEqual("A title is required.Please enter a title.", error);
             _repository.Verify(r => r.Add(It.IsAny<Note>()), Times.Never);
         }
 
