@@ -34,7 +34,7 @@ namespace NotesApp.Core
             var cleanBody = (body ?? string.Empty).Trim();
 
             if (cleanTitle.Length == 0)
-                return "A title is required.";
+                return "A title is required.Please enter a title.";
             if (cleanTitle.Length > MaxTitleLength)
                 return "The title can be at most " + MaxTitleLength + " characters.";
             if (cleanBody.Length > MaxBodyLength)
